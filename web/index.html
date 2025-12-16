@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Omok RL Playground</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <header>
+        <h1>Omok RL</h1>
+        <p class="subtitle">Long Pro · 15x15 · Play against self-play checkpoints</p>
+        <div class="controls">
+          <button id="new-game">New Game</button>
+          <label class="select-wrap">
+            <span>Model</span>
+            <select id="model-select"></select>
+          </label>
+        </div>
+      </header>
+
+      <main>
+        <div id="board" class="board"></div>
+        <aside class="info">
+          <div class="status">
+            <h3>Status</h3>
+            <p id="status-text">Loading...</p>
+          </div>
+          <div class="legend">
+            <h3>Legend</h3>
+            <p><span class="stone black"></span> Black (You)</p>
+            <p><span class="stone white"></span> White (AI)</p>
+          </div>
+          <div class="note">
+            <h3>Notes</h3>
+            <ul>
+              <li>Rule: Long Pro (black overlines are fouls)</li>
+              <li>Board: 15x15 fixed</li>
+              <li>Use the model selector to swap checkpoints</li>
+            </ul>
+          </div>
+        </aside>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
