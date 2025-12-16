@@ -53,7 +53,7 @@ def play_self_play_game(
         add_noise = True
         pi = mcts.run(board, num_simulations=simulations, add_noise=add_noise)
         move_temp = temperature if len(history) < temp_decay_move else 1e-3
-        legal_actions = [board.to_flat_index(x, y) for (x, y) in board.legal_moves()]
+        legal_actions = board.legal_actions_flat()
         action = select_action(pi, temperature=move_temp, legal_actions=legal_actions)
         x, y = board.from_flat_index(action)
         result = board.play_move(x, y)

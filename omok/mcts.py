@@ -91,7 +91,7 @@ class MCTS:
         # Expand root if unseen.
         if not root.expanded:
             policy, value = self._evaluate(board)
-            valid_actions = [board.to_flat_index(x, y) for (x, y) in board.legal_moves()]
+            valid_actions = board.legal_actions_flat()
             masked_policy = self._mask_policy(policy, valid_actions)
             root.expand(valid_actions, masked_policy)
         if add_noise:
@@ -118,7 +118,7 @@ class MCTS:
         visits = np.zeros(self.board_size * self.board_size, dtype=np.float32)
         for action, child in root.children.items():
             visits[action] = child.visits
-        legal_actions = [board.to_flat_index(x, y) for (x, y) in board.legal_moves()]
+        legal_actions = board.legal_actions_flat()
         if legal_actions:
             visits = self._mask_policy(visits, legal_actions)
         return visits
@@ -149,7 +149,7 @@ class MCTS:
         boards = [b for (b, _, _) in pending]
         policies, values = self._evaluate_batch(boards)
         for (b, path, leaf_node), policy, value in zip(pending, policies, values):
-            valid_actions = [b.to_flat_index(x, y) for (x, y) in b.legal_moves()]
+            valid_actions = b.legal_actions_flat()
             masked_policy = self._mask_policy(policy, valid_actions)
             leaf_node.expand(valid_actions, masked_policy)
             self._backpropagate(path, float(value))

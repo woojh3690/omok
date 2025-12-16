@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 import typer
 from torch.utils.data import DataLoader, TensorDataset
@@ -18,9 +19,9 @@ app = typer.Typer(add_completion=False)
 
 
 def tensorize(samples):
-    planes = torch.tensor([s[0] for s in samples], dtype=torch.float32)
-    target_p = torch.tensor([s[1] for s in samples], dtype=torch.float32)
-    target_v = torch.tensor([s[2] for s in samples], dtype=torch.float32)
+    planes = torch.from_numpy(np.stack([s[0] for s in samples]).astype(np.float32))
+    target_p = torch.from_numpy(np.stack([s[1] for s in samples]).astype(np.float32))
+    target_v = torch.from_numpy(np.asarray([s[2] for s in samples], dtype=np.float32))
     return planes, target_p, target_v
 
 

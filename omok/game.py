@@ -30,6 +30,7 @@ class GomokuBoard:
     def __init__(self, size: int = 15):
         self.size = size
         self.board = np.zeros((size, size), dtype=np.int8)
+        self.empty_count = size * size
         self.current_player = BLACK
         self.winner: Optional[int] = None
         self.foul: bool = False
@@ -38,6 +39,7 @@ class GomokuBoard:
     def clone(self) -> "GomokuBoard":
         other = GomokuBoard(self.size)
         other.board = self.board.copy()
+        other.empty_count = self.empty_count
         other.current_player = self.current_player
         other.winner = self.winner
         other.foul = self.foul
@@ -46,6 +48,7 @@ class GomokuBoard:
 
     def reset(self) -> None:
         self.board.fill(EMPTY)
+        self.empty_count = self.size * self.size
         self.current_player = BLACK
         self.winner = None
         self.foul = False
@@ -59,7 +62,17 @@ class GomokuBoard:
         return self.board[y, x] == EMPTY
 
     def legal_moves(self) -> List[Tuple[int, int]]:
-        return [(x, y) for y in range(self.size) for x in range(self.size) if self.board[y, x] == EMPTY]
+        if self.empty_count <= 0:
+            return []
+        coords = np.argwhere(self.board == EMPTY)  # (y, x)
+        return [(int(x), int(y)) for y, x in coords]
+
+    def legal_actions_flat(self) -> List[int]:
+        """Return legal moves as flat indices (y*size+x). Faster than iterating in Python."""
+        if self.empty_count <= 0:
+            return []
+        empties = np.flatnonzero(self.board.ravel() == EMPTY)
+        return empties.astype(np.int32).tolist()
 
     def _line_length(self, x: int, y: int, dx: int, dy: int) -> int:
         """Count contiguous stones for the player at (x,y) along (dx,dy) both directions."""
@@ -87,6 +100,7 @@ class GomokuBoard:
             raise ValueError("Invalid move")
 
         self.board[y, x] = self.current_player
+        self.empty_count -= 1
         self.last_move = (x, y)
 
         max_line = self._max_line_after_move(x, y)
@@ -100,7 +114,7 @@ class GomokuBoard:
         # 흑은 정확히 5목, 백은 5목 이상이면 승리
         elif max_line == 5 or (self.current_player == WHITE and max_line > 5):
             winner = self.current_player
-        elif not self.legal_moves():
+        elif self.empty_count <= 0:
             winner = 0  # Draw
 
         if winner is not None:
