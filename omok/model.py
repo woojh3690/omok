@@ -101,7 +101,9 @@ class ModelWrapper:
             inp = torch.from_numpy(planes).to(self.device)
             policy_logits, values = self.net(inp)
             policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
-            return policy, values.squeeze(-1).cpu().numpy()
+            # Keep `values` iterable even when batch size is 1.
+            values = values.view(-1)
+            return policy, values.cpu().numpy()
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)

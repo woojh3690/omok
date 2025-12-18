@@ -168,6 +168,12 @@ class MCTS:
                 values.append(v)
             policy = np.stack(policies)
             value = np.array(values, dtype=np.float32)
+        policy = np.asarray(policy)
+        value = np.asarray(value)
+        if policy.ndim == 1:
+            policy = policy[None, :]
+        if value.ndim == 0:
+            value = value.reshape(1)
         return policy, value
 
     def _mask_policy(self, policy: np.ndarray, valid_actions) -> np.ndarray:

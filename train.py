@@ -4,6 +4,7 @@ import shutil
 import time
 from pathlib import Path
 from typing import Optional
+import re
 
 import numpy as np
 import torch
@@ -25,6 +26,77 @@ def tensorize(samples):
     return planes, target_p, target_v
 
 
+def _infer_last_epoch(best_dir: Path, registry: ModelRegistry) -> int:
+    candidates: list[int] = []
+    if best_dir.exists():
+        for p in best_dir.glob("model_*.pt"):
+            m = re.search(r"model_(\\d+)\\.pt$", p.name)
+            if m:
+                candidates.append(int(m.group(1)))
+    for info in registry.list_models():
+        m = re.search(r"(\\d+)$", info.id)
+        if m:
+            candidates.append(int(m.group(1)))
+    return max(candidates, default=0)
+
+
+def _find_latest_weights(latest_dir: Path, best_dir: Path, registry: ModelRegistry) -> Optional[Path]:
+    candidates: list[Path] = []
+    latest_pt = latest_dir / "latest.pt"
+    if latest_pt.exists():
+        candidates.append(latest_pt)
+    if best_dir.exists():
+        candidates.extend([p for p in best_dir.glob("*.pt") if p.is_file()])
+    for info in registry.list_models():
+        p = Path(info.path)
+        if p.exists():
+            candidates.append(p)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _load_training_checkpoint(
+    ckpt_path: Path,
+    model: ModelWrapper,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+) -> dict:
+    state = torch.load(ckpt_path, map_location=model.device)
+    model.net.load_state_dict(state["model_state"])
+    if "optimizer_state" in state:
+        optimizer.load_state_dict(state["optimizer_state"])
+    if "scaler_state" in state and scaler is not None:
+        try:
+            scaler.load_state_dict(state["scaler_state"])
+        except Exception:
+            pass
+    return state
+
+
+def _save_training_checkpoint(
+    ckpt_path: Path,
+    *,
+    epoch: int,
+    model: ModelWrapper,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    best_loss: Optional[float],
+) -> None:
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "epoch": epoch,
+            "best_loss": best_loss,
+            "board_size": model.board_size,
+            "model_state": model.net.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scaler_state": scaler.state_dict() if scaler is not None else None,
+        },
+        ckpt_path,
+    )
+
+
 @app.command()
 def main(
     epochs: int = typer.Option(1000, help="Number of training epochs."),
@@ -35,6 +107,7 @@ def main(
     save_every: int = typer.Option(1, help="Save checkpoint every N epochs."),
     min_improvement: float = typer.Option(0.01, help="Loss delta to promote a model as best."),
     board_size: int = typer.Option(15, help="Board size (default 15)."),
+    resume: bool = typer.Option(True, help="Resume from latest saved checkpoint if available."),
 ) -> None:
     registry = ModelRegistry()
     model = ModelWrapper(board_size=board_size)
@@ -47,7 +120,28 @@ def main(
     latest_dir.mkdir(parents=True, exist_ok=True)
     best_dir.mkdir(parents=True, exist_ok=True)
 
-    for epoch in range(1, epochs + 1):
+    start_epoch = 1
+    ckpt_path = latest_dir / "latest.ckpt"
+    if resume:
+        if ckpt_path.exists():
+            ckpt = _load_training_checkpoint(ckpt_path, model, optimizer, scaler)
+            start_epoch = int(ckpt.get("epoch", 0)) + 1
+            best_loss = ckpt.get("best_loss")
+            print(f"Resumed training from {ckpt_path} (epoch={start_epoch - 1}).")
+        else:
+            weights = _find_latest_weights(latest_dir, best_dir, registry)
+            if weights is not None:
+                model.load(weights)
+                start_epoch = _infer_last_epoch(best_dir, registry) + 1
+                losses = [m.loss for m in registry.list_models()]
+                best_loss = min(losses) if losses else None
+                print(f"Loaded latest weights from {weights} (starting epoch={start_epoch}).")
+
+    if start_epoch > epochs:
+        print(f"Nothing to do: start_epoch ({start_epoch}) > epochs ({epochs}).")
+        return
+
+    for epoch in range(start_epoch, epochs + 1):
         start = time.time()
         mcts = MCTS(model=model, board_size=board_size)
         buffer = []
@@ -79,6 +173,14 @@ def main(
         if epoch % save_every == 0:
             latest_path = latest_dir / "latest.pt"
             model.save(latest_path)
+            _save_training_checkpoint(
+                ckpt_path,
+                epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                scaler=scaler,
+                best_loss=best_loss,
+            )
 
         improved = best_loss is None or epoch_loss < (best_loss - min_improvement)
         if improved:
