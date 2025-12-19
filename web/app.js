@@ -65,10 +65,12 @@ async function fetchModels() {
   data.models.forEach((m) => {
     const opt = document.createElement("option");
     opt.value = m.id;
-    opt.textContent = `${m.id} (loss ${m.loss.toFixed(3)})`;
+    const lossText = Number.isFinite(m.loss) ? m.loss.toFixed(3) : "n/a";
+    opt.textContent = `${m.id} (loss ${lossText})`;
     if (m.id === data.active_id) opt.selected = true;
     modelSelect.appendChild(opt);
   });
+  modelSelect.disabled = true;
 }
 
 async function onCellClick(x, y) {

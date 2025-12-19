@@ -1,6 +1,4 @@
-from __future__ import annotations
-
-import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,18 +31,68 @@ class ModelManager:
         self.registry = ModelRegistry()
         self.model = ModelWrapper(board_size=board_size)
         self.board_size = board_size
-        self._load_active_or_default()
+        self.active_id: Optional[str] = None
+        self.active_path: Optional[Path] = None
+        self._load_latest_or_default()
 
-    def _load_active_or_default(self):
-        info = self.registry.active_model()
-        if info and Path(info.path).exists():
-            self.model.load(info.path)
-            print(f"Loaded active model {info.id}")
-        else:
-            print("Using freshly initialized model (no active checkpoint found).")
+    def _find_latest_weights(self) -> Optional[Path]:
+        candidates: list[Path] = []
+        latest_path = Path("checkpoints/latest/latest.pt")
+        if latest_path.exists():
+            candidates.append(latest_path)
+        best_dir = Path("checkpoints/best")
+        if best_dir.exists():
+            candidates.extend([p for p in best_dir.glob("*.pt") if p.is_file()])
+        for info in self.registry.list_models():
+            p = Path(info.path)
+            if p.exists():
+                candidates.append(p)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    def _resolve_active_id(self, path: Path) -> str:
+        if path.name == "latest.pt":
+            return "latest"
+        for info in self.registry.list_models():
+            if Path(info.path) == path:
+                return info.id
+        return path.stem
+
+    def _latest_entry(self) -> Optional[dict]:
+        latest_path = Path("checkpoints/latest/latest.pt")
+        if not latest_path.exists():
+            return None
+        created_at = datetime.fromtimestamp(
+            latest_path.stat().st_mtime, tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+        return {
+            "id": "latest",
+            "path": str(latest_path),
+            "loss": None,
+            "created_at": created_at,
+            "tag": "latest",
+        }
+
+    def _load_latest_or_default(self):
+        latest_path = self._find_latest_weights()
+        if latest_path is None:
+            print("Using freshly initialized model (no checkpoint found).")
+            return
+
+        self.model.load(latest_path)
+        self.active_path = latest_path
+        self.active_id = self._resolve_active_id(latest_path)
+        if self.active_id in self.registry.models:
+            self.registry.set_active(self.active_id)
+        print(f"Loaded latest model {self.active_id}")
 
     def list_models(self):
-        return [m.__dict__ for m in self.registry.list_models()]
+        items = [m.__dict__ for m in self.registry.list_models()]
+        latest = self._latest_entry()
+        if latest is not None:
+            items = [latest, *items]
+        return items
 
     def set_active(self, model_id: str):
         info = self.registry.set_active(model_id)
@@ -76,16 +124,12 @@ async def index():
 
 @app.get("/api/models")
 async def list_models():
-    return {"models": models.list_models(), "active_id": models.registry.active_id}
+    return {"models": models.list_models(), "active_id": models.active_id}
 
 
 @app.post("/api/models/select")
 async def select_model(payload: dict):
-    model_id = payload.get("model_id")
-    if not model_id:
-        raise HTTPException(status_code=400, detail="model_id required")
-    info = models.set_active(model_id)
-    return {"active_id": info.id}
+    raise HTTPException(status_code=403, detail="Model selection is disabled")
 
 
 @app.post("/api/game/new")
