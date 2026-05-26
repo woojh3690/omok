@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Tuple
 
@@ -12,6 +11,14 @@ import torch.nn.functional as F
 
 def conv3(in_ch: int, out_ch: int) -> nn.Conv2d:
     return nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False)
+
+
+def cuda_autocast(enabled: bool):
+    if not enabled:
+        return nullcontext()
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast("cuda", enabled=True)
+    return torch.cuda.amp.autocast(enabled=True)
 
 
 class ResidualBlock(nn.Module):
@@ -115,16 +122,21 @@ class ModelWrapper:
         self.net.to(self.device)
         self.net.eval()
 
-    def train_step(self, batch, optimizer, scaler=None) -> Tuple[float, float]:
+    def train_step(self, batch, optimizer, scaler=None, max_grad_norm: float = 5.0) -> Tuple[float, float]:
         """Batch = (planes, target_policy (probabilities), target_value)."""
         planes, target_p, target_v = batch
         planes = planes.to(self.device)
         target_p = target_p.to(self.device)
         target_v = target_v.to(self.device)
 
+        # MCTS 방문수가 모두 0인 예외 배치도 학습을 깨지 않도록 확률분포로 보정한다.
+        target_sum = target_p.sum(dim=1, keepdim=True)
+        uniform = torch.full_like(target_p, 1.0 / target_p.size(1))
+        target_p = torch.where(target_sum > 1e-8, target_p / target_sum.clamp_min(1e-8), uniform)
+
         self.net.train()
         optimizer.zero_grad()
-        use_scaler = scaler is not None
+        use_scaler = scaler is not None and scaler.is_enabled()
 
         def forward_pass():
             p_logits, v = self.net(planes)
@@ -135,14 +147,19 @@ class ModelWrapper:
             return policy_loss, value_loss, policy_loss + value_loss
 
         if use_scaler:
-            with torch.amp.autocast('cuda'):
+            with cuda_autocast(True):
                 p_loss, v_loss, loss = forward_pass()
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
         else:
             p_loss, v_loss, loss = forward_pass()
             loss.backward()
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_grad_norm)
             optimizer.step()
 
         return float(p_loss.item()), float(v_loss.item())

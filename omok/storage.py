@@ -30,7 +30,7 @@ class ModelRegistry:
     def _load(self) -> None:
         if not self.index_path.exists():
             return
-        data = json.loads(self.index_path.read_text())
+        data = json.loads(self.index_path.read_text(encoding="utf-8"))
         self.active_id = data.get("active_id")
         for item in data.get("models", []):
             info = ModelInfo(**item)
@@ -41,7 +41,7 @@ class ModelRegistry:
             "active_id": self.active_id,
             "models": [asdict(m) for m in self.models.values()],
         }
-        self.index_path.write_text(json.dumps(payload, indent=2))
+        self.index_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def register(self, path: Path, loss: float, tag: str = "best") -> ModelInfo:
         model_id = path.stem

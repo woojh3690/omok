@@ -5,9 +5,8 @@ Reinforcement-learning playground for Gomoku (15x15, Long Pro rule). The project
 ## Getting started
 
 ```bash
-py -m venv .venv  # or python -m venv .venv
-.venv\\Scripts\\activate
-pip install -r requirements.txt
+uv venv
+uv pip install -r requirements.txt
 ```
 
 ## Training
@@ -15,10 +14,16 @@ pip install -r requirements.txt
 Self-play + training loop (tweak hyper-parameters inside `train.py`):
 
 ```bash
-py train.py --epochs 50 --games-per-epoch 20 --visits 200
+uv run python train.py --epochs 50 --games-per-epoch 20 --visits 200
 ```
 
 Checkpoints live in `checkpoints/latest` and promoted best models are copied to `checkpoints/best`. A lightweight `model_index.json` keeps metadata for the web UI.
+
+Quick tactical verification for a trained checkpoint:
+
+```bash
+uv run python -m omok.evaluation --weights checkpoints/latest/latest.pt
+```
 
 Assumptions about Long Pro: black must win with exactly five; making an overline (6+) is a foul that awards the win to white. White wins on five or more in a row.
 

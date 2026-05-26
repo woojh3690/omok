@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import List, Tuple
 
@@ -18,23 +16,44 @@ class EpisodeStep:
 
 def select_action(prob: np.ndarray, temperature: float, legal_actions: list[int] | None = None) -> int:
     """Sample an action; if prob is degenerate, fall back to uniform over legal moves."""
+    prob = np.asarray(prob, dtype=np.float64)
     if legal_actions is not None:
-        mask = np.zeros_like(prob)
-        mask[legal_actions] = prob[legal_actions]
-        prob = mask
-    if temperature <= 1e-6:
+        legal_actions = list(legal_actions)
+        if not legal_actions:
+            raise ValueError("No legal actions to sample")
+        legal_prob = np.zeros_like(prob, dtype=np.float64)
+        legal_prob[legal_actions] = np.maximum(prob[legal_actions], 0.0)
+        prob = legal_prob
+
+    if temperature <= 0.05:
+        if legal_actions is not None:
+            legal_scores = prob[legal_actions]
+            return int(legal_actions[int(np.argmax(legal_scores))])
         return int(np.argmax(prob))
-    # 온도 샘플링으로 초반 탐험 확대
-    scaled = np.power(prob, 1.0 / temperature)
-    scaled_sum = scaled.sum()
-    if scaled_sum <= 1e-8:
-        if legal_actions:
-            scaled = np.zeros_like(prob)
+
+    # 낮은 온도에서도 언더플로우가 나지 않도록 log 확률에서 softmax를 계산한다.
+    positive = np.maximum(prob, 0.0)
+    if positive.sum() <= 1e-12:
+        if legal_actions is not None:
+            scaled = np.zeros_like(prob, dtype=np.float64)
             scaled[legal_actions] = 1.0 / len(legal_actions)
         else:
-            scaled = np.ones_like(prob) / len(prob)
+            scaled = np.ones_like(prob, dtype=np.float64) / len(prob)
     else:
-        scaled /= scaled_sum
+        logits = np.full_like(prob, -np.inf, dtype=np.float64)
+        support = np.flatnonzero(positive > 0)
+        logits[support] = np.log(positive[support]) / temperature
+        max_logit = np.max(logits[support])
+        scaled = np.zeros_like(prob, dtype=np.float64)
+        scaled[support] = np.exp(logits[support] - max_logit)
+        scaled_sum = scaled.sum()
+        if scaled_sum <= 1e-12:
+            if legal_actions is not None:
+                scaled[legal_actions] = 1.0 / len(legal_actions)
+            else:
+                scaled.fill(1.0 / len(prob))
+        else:
+            scaled /= scaled_sum
     return int(np.random.choice(len(prob), p=scaled))
 
 
@@ -43,7 +62,11 @@ def play_self_play_game(
     simulations: int = 200,
     temperature: float = 1.0,
     temp_decay_move: int = 20,
+    clear_tree: bool = True,
 ) -> List[Tuple[np.ndarray, np.ndarray, float]]:
+    if clear_tree:
+        mcts.clear()
+
     board = GomokuBoard(size=mcts.board_size)
     history: List[EpisodeStep] = []
 
