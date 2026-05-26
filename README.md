@@ -19,10 +19,18 @@ uv run python train.py --epochs 50 --games-per-epoch 20 --visits 200
 
 Checkpoints live in `checkpoints/latest` and promoted best models are copied to `checkpoints/best`. A lightweight `model_index.json` keeps metadata for the web UI.
 
+For a CUDA machine, keep MCTS on CPU but batch the neural-network leaf evaluations on GPU:
+
+```bash
+uv run python train.py --epochs 150 --games-per-epoch 20 --visits 160 --mcts-batch-size 64 --batch-size 256 --data-workers 2
+```
+
+Use `--mcts-batch-size 0` to choose a default automatically: 64 on CUDA, 16 on CPU.
+
 Quick tactical verification for a trained checkpoint:
 
 ```bash
-uv run python -m omok.evaluation --weights checkpoints/latest/latest.pt
+uv run python -m omok.evaluation --weights checkpoints/latest/latest.pt --mcts-batch-size 64
 ```
 
 Assumptions about Long Pro: black must win with exactly five; making an overline (6+) is a foul that awards the win to white. White wins on five or more in a row.

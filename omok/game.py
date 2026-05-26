@@ -93,6 +93,27 @@ class GomokuBoard:
         directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
         return max(self._line_length(x, y, dx, dy) for dx, dy in directions)
 
+    def winner_after_virtual_move(self, player: int, x: int, y: int) -> Optional[int]:
+        if self.winner is not None:
+            return None
+        if not (0 <= x < self.size and 0 <= y < self.size):
+            return None
+        if self.board[y, x] != EMPTY:
+            return None
+
+        self.board[y, x] = player
+        try:
+            max_line = self._max_line_after_move(x, y)
+        finally:
+            self.board[y, x] = EMPTY
+
+        # Long Pro: 흑의 장목은 흑 승리가 아니라 백 승리 반칙이다.
+        if player == BLACK and max_line >= 6:
+            return WHITE
+        if max_line == 5 or (player == WHITE and max_line > 5):
+            return player
+        return None
+
     def play_move(self, x: int, y: int) -> MoveResult:
         if not self.is_valid_move(x, y):
             raise ValueError("Invalid move")

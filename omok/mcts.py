@@ -18,6 +18,7 @@ class Node:
     priors: Dict[int, float] = field(default_factory=dict)
     children: Dict[int, "Node"] = field(default_factory=dict)
     visits: int = 0
+    virtual_visits: int = 0
     value_sum: float = 0.0
     expanded: bool = False
 
@@ -32,13 +33,14 @@ class Node:
         return -self.q_value()
 
     def select(self, c_puct: float) -> int:
-        total_visits = sum(child.visits for child in self.children.values())
+        total_visits = sum(child.visits + child.virtual_visits for child in self.children.values())
         best_score = -1e9
         best_action = None
         for action, child in self.children.items():
             prior = self.priors.get(action, 0.0)
+            child_visits = child.visits + child.virtual_visits
             # UCB 점수: 탐험(prior) + 가치(Q)
-            u = c_puct * prior * math.sqrt(total_visits + 1) / (1 + child.visits)
+            u = c_puct * prior * math.sqrt(total_visits + 1) / (1 + child_visits)
             score = child.q_value_for_parent(self.player) + u
             if score > best_score:
                 best_score = score
@@ -72,14 +74,17 @@ class MCTS:
         c_puct: float = 2.5,
         dirichlet_alpha: float = 0.03,
         dirichlet_frac: float = 0.25,
-        eval_batch_size: int = 16,
+        eval_batch_size: Optional[int] = None,
     ):
         self.model = model
         self.board_size = board_size
         self.c_puct = c_puct
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_frac = dirichlet_frac
-        self.eval_batch_size = eval_batch_size
+        if eval_batch_size is None:
+            device_type = getattr(getattr(model, "device", None), "type", None)
+            eval_batch_size = 64 if device_type == "cuda" else 16
+        self.eval_batch_size = max(1, int(eval_batch_size))
         self.nodes: Dict[bytes, Node] = {}
 
     def clear(self) -> None:
@@ -95,10 +100,7 @@ class MCTS:
         actions: list[int] = []
         for action in board.legal_actions_flat():
             x, y = board.from_flat_index(action)
-            test_board = board.clone()
-            test_board.current_player = player
-            result = test_board.play_move(x, y)
-            if result.winner == player:
+            if board.winner_after_virtual_move(player, x, y) == player:
                 actions.append(action)
         return actions
 
@@ -163,6 +165,7 @@ class MCTS:
 
                 pending.append((sim_board, path, leaf_node))
                 pending_keys.add(leaf_key)
+                self._add_virtual_visits(path)
                 if len(pending) >= self.eval_batch_size:
                     self._evaluate_pending(pending)
                     pending.clear()
@@ -209,6 +212,7 @@ class MCTS:
         boards = [b for (b, _, _) in pending]
         policies, values = self._evaluate_batch(boards)
         for (b, path, leaf_node), policy, value in zip(pending, policies, values):
+            self._remove_virtual_visits(path)
             valid_actions = b.legal_actions_flat()
             masked_policy = self._mask_policy(policy, valid_actions)
             leaf_node.expand(valid_actions, masked_policy)
@@ -260,6 +264,15 @@ class MCTS:
 
     def _opponent(self, player: int) -> int:
         return WHITE if player == BLACK else BLACK
+
+    def _add_virtual_visits(self, path: list[Node]) -> None:
+        # 배치 평가 대기 중인 리프를 다시 고르지 않도록 임시 방문수를 더한다.
+        for node in path:
+            node.virtual_visits += 1
+
+    def _remove_virtual_visits(self, path: list[Node]) -> None:
+        for node in path:
+            node.virtual_visits = max(0, node.virtual_visits - 1)
 
     def _backpropagate(self, path: list[Node], leaf_value: float) -> None:
         if not path:

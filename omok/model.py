@@ -87,29 +87,27 @@ class GomokuNet(nn.Module):
 class ModelWrapper:
     board_size: int = 15
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    inference_amp: bool = True
 
     def __post_init__(self):
         self.net = GomokuNet(board_size=self.board_size)
         self.net.to(self.device)
 
     def predict(self, board) -> Tuple:
-        self.net.eval()
-        with torch.no_grad():
-            inp = torch.from_numpy(board.canonical_board()).unsqueeze(0).to(self.device)
-            policy_logits, value = self.net(inp)
-            policy = torch.softmax(policy_logits, dim=1).cpu().numpy()[0]
-            return policy, float(value.item())
+        policy, value = self.predict_batch([board])
+        return policy[0], float(value[0])
 
     def predict_batch(self, boards) -> Tuple[np.ndarray, np.ndarray]:
         """Vectorized inference for multiple boards to amortize model overhead."""
         self.net.eval()
-        with torch.no_grad():
+        use_amp = self.inference_amp and self.device.type == "cuda"
+        with torch.inference_mode(), cuda_autocast(use_amp):
             planes = np.stack([b.canonical_board() for b in boards]).astype(np.float32)
-            inp = torch.from_numpy(planes).to(self.device)
+            inp = torch.from_numpy(planes).to(self.device, non_blocking=self.device.type == "cuda")
             policy_logits, values = self.net(inp)
-            policy = torch.softmax(policy_logits, dim=1).cpu().numpy()
+            policy = torch.softmax(policy_logits.float(), dim=1).cpu().numpy()
             # Keep `values` iterable even when batch size is 1.
-            values = values.view(-1)
+            values = values.float().view(-1)
             return policy, values.cpu().numpy()
 
     def save(self, path: str | Path) -> None:
@@ -125,9 +123,10 @@ class ModelWrapper:
     def train_step(self, batch, optimizer, scaler=None, max_grad_norm: float = 5.0) -> Tuple[float, float]:
         """Batch = (planes, target_policy (probabilities), target_value)."""
         planes, target_p, target_v = batch
-        planes = planes.to(self.device)
-        target_p = target_p.to(self.device)
-        target_v = target_v.to(self.device)
+        non_blocking = self.device.type == "cuda"
+        planes = planes.to(self.device, non_blocking=non_blocking)
+        target_p = target_p.to(self.device, non_blocking=non_blocking)
+        target_v = target_v.to(self.device, non_blocking=non_blocking)
 
         # MCTS 방문수가 모두 0인 예외 배치도 학습을 깨지 않도록 확률분포로 보정한다.
         target_sum = target_p.sum(dim=1, keepdim=True)

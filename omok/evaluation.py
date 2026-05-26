@@ -122,15 +122,16 @@ def _best_expected_rank(policy: np.ndarray, board: GomokuBoard, expected_actions
 
 
 def evaluate_tactical_positions(
-    model: ModelWrapper, board_size: int = 15, simulations: int = 128
+    model: ModelWrapper, board_size: int = 15, simulations: int = 128, mcts_batch_size: int = 0
 ) -> list[TacticalResult]:
     results = []
+    eval_batch_size = None if mcts_batch_size <= 0 else mcts_batch_size
     for case in build_tactical_cases(board_size):
         raw_policy, raw_value = model.predict(case.board)
         raw_top_action = _best_legal_action(raw_policy, case.board)
         raw_expected_rank = _best_expected_rank(raw_policy, case.board, case.expected_actions)
 
-        mcts = MCTS(model=model, board_size=board_size)
+        mcts = MCTS(model=model, board_size=board_size, eval_batch_size=eval_batch_size)
         visit_policy = mcts.run(case.board.clone(), num_simulations=simulations, add_noise=False)
         mcts_action = _best_legal_action(visit_policy, case.board)
         results.append(
@@ -164,10 +165,16 @@ def main() -> int:
     parser.add_argument("--weights", type=Path, default=Path("checkpoints/latest/latest.pt"))
     parser.add_argument("--board-size", type=int, default=15)
     parser.add_argument("--simulations", type=int, default=128)
+    parser.add_argument("--mcts-batch-size", type=int, default=0)
     args = parser.parse_args()
 
     model = load_model(args.weights, args.board_size)
-    results = evaluate_tactical_positions(model, board_size=args.board_size, simulations=args.simulations)
+    results = evaluate_tactical_positions(
+        model,
+        board_size=args.board_size,
+        simulations=args.simulations,
+        mcts_batch_size=args.mcts_batch_size,
+    )
     failed = [result for result in results if not result.passed]
 
     for result in results:

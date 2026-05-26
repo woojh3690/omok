@@ -26,6 +26,14 @@ def make_grad_scaler():
     return torch.cuda.amp.GradScaler(enabled=True)
 
 
+def configure_torch_runtime() -> None:
+    if not torch.cuda.is_available():
+        return
+    torch.backends.cudnn.benchmark = True
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("high")
+
+
 def set_seed(seed: Optional[int]) -> None:
     if seed is None:
         return
@@ -168,8 +176,12 @@ def main(
     save_every: int = typer.Option(1, help="Save checkpoint every N epochs."),
     min_improvement: float = typer.Option(0.01, help="Loss delta to promote a model as best."),
     board_size: int = typer.Option(15, help="Board size (default 15)."),
+    mcts_batch_size: int = typer.Option(
+        0, help="Leaf evaluation batch size for MCTS. 0 chooses 64 on CUDA and 16 on CPU."
+    ),
     replay_buffer_size: int = typer.Option(20000, help="Maximum self-play samples kept for replay."),
     train_passes: int = typer.Option(2, help="Training passes over the replay buffer per epoch."),
+    data_workers: int = typer.Option(0, help="DataLoader worker processes for training batches."),
     max_grad_norm: float = typer.Option(5.0, help="Gradient clipping norm. Set <=0 to disable."),
     loss_ema_alpha: float = typer.Option(0.3, help="EMA smoothing factor for best-model promotion."),
     augment: bool = typer.Option(True, help="Use 8-way board symmetry augmentation."),
@@ -178,8 +190,11 @@ def main(
     resume: bool = typer.Option(True, help="Resume from latest saved checkpoint if available."),
 ) -> None:
     set_seed(seed)
+    configure_torch_runtime()
     registry = ModelRegistry(root=checkpoint_root)
     model = ModelWrapper(board_size=board_size)
+    if mcts_batch_size <= 0:
+        mcts_batch_size = 64 if model.device.type == "cuda" else 16
     optimizer = torch.optim.Adam(model.net.parameters(), lr=lr, weight_decay=1e-4)
     scaler = make_grad_scaler()
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -190,6 +205,7 @@ def main(
     replay_buffer = deque(maxlen=max(1, replay_buffer_size))
     save_every = max(1, save_every)
     train_passes = max(1, train_passes)
+    data_workers = max(0, data_workers)
     loss_ema_alpha = min(1.0, max(0.0, loss_ema_alpha))
 
     latest_dir = checkpoint_root / "latest"
@@ -221,7 +237,7 @@ def main(
 
     for epoch in range(start_epoch, epochs + 1):
         start = time.time()
-        mcts = MCTS(model=model, board_size=board_size)
+        mcts = MCTS(model=model, board_size=board_size, eval_batch_size=mcts_batch_size)
         new_samples = []
 
         for g in range(games_per_epoch):
@@ -234,7 +250,18 @@ def main(
         if seed is not None:
             generator = torch.Generator()
             generator.manual_seed(seed + epoch)
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=generator)
+        loader_kwargs = {}
+        if data_workers > 0:
+            loader_kwargs["num_workers"] = data_workers
+            loader_kwargs["persistent_workers"] = True
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            generator=generator,
+            pin_memory=model.device.type == "cuda",
+            **loader_kwargs,
+        )
 
         policy_losses = []
         value_losses = []
@@ -259,7 +286,8 @@ def main(
         print(
             f"Epoch {epoch}/{epochs} loss={epoch_loss:.4f} ema={loss_ema:.4f} "
             f"(p={epoch_p_loss:.4f}, v={epoch_v_loss:.4f}) "
-            f"samples={len(new_samples)} replay={len(replay_buffer)} lr={current_lr:.2e} time={duration:.1f}s"
+            f"samples={len(new_samples)} replay={len(replay_buffer)} "
+            f"mcts_batch={mcts_batch_size} lr={current_lr:.2e} time={duration:.1f}s"
         )
 
         metric_loss = loss_ema
