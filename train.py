@@ -1,5 +1,8 @@
+import multiprocessing as mp
+import os
 import random
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import deque
 from pathlib import Path
 from typing import Optional
@@ -42,6 +45,161 @@ def set_seed(seed: Optional[int]) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+_SELF_PLAY_MCTS: Optional[MCTS] = None
+_SELF_PLAY_VISITS = 0
+_SELF_PLAY_BASE_SEED: Optional[int] = None
+
+
+def _copy_state_dict_to_cpu(model: ModelWrapper) -> dict[str, torch.Tensor]:
+    # 워커 프로세스에 CUDA 텐서를 직접 넘기지 않도록 CPU 스냅샷을 만든다.
+    return {name: tensor.detach().cpu() for name, tensor in model.net.state_dict().items()}
+
+
+def _normalize_device_choice(device_choice: str) -> str:
+    # CLI로 받은 self-play 장치 값을 허용된 값으로 정규화한다.
+    normalized = device_choice.strip().lower()
+    if normalized not in {"auto", "cpu", "cuda"}:
+        raise typer.BadParameter("self-play-device must be one of: auto, cpu, cuda")
+    return normalized
+
+
+def _resolve_self_play_device(device_choice: str, worker_count: int, train_device: torch.device) -> torch.device:
+    # 병렬 self-play에서는 여러 프로세스가 CUDA 컨텍스트를 중복 생성하지 않도록 자동 모드를 CPU로 둔다.
+    normalized = _normalize_device_choice(device_choice)
+    if normalized == "cpu":
+        return torch.device("cpu")
+    if normalized == "cuda":
+        if not torch.cuda.is_available():
+            raise typer.BadParameter("self-play-device=cuda was requested, but CUDA is not available.")
+        return torch.device("cuda")
+    if worker_count > 1 and train_device.type == "cuda":
+        return torch.device("cpu")
+    return train_device
+
+
+def _build_self_play_model(
+    state_dict: dict[str, torch.Tensor],
+    board_size: int,
+    device: torch.device,
+) -> ModelWrapper:
+    # self-play 전용 모델을 지정 장치에 만들고 현재 학습 가중치를 적재한다.
+    model = ModelWrapper(board_size=board_size, device=device)
+    model.net.load_state_dict(state_dict)
+    model.net.to(model.device)
+    model.net.eval()
+    return model
+
+
+def _resolve_self_play_workers(requested_workers: int, games_per_epoch: int) -> int:
+    # 0 이하 값은 현재 PC의 논리 코어를 최대한 쓰는 자동 설정으로 처리한다.
+    if games_per_epoch <= 1:
+        return 1
+    if requested_workers <= 0:
+        cpu_count = os.cpu_count() or 1
+        requested_workers = max(1, cpu_count)
+    return min(max(1, requested_workers), games_per_epoch)
+
+
+def _self_play_worker_init(
+    state_dict: dict[str, torch.Tensor],
+    board_size: int,
+    visits: int,
+    mcts_batch_size: int,
+    device_type: str,
+    base_seed: Optional[int],
+    torch_threads: int,
+) -> None:
+    global _SELF_PLAY_MCTS, _SELF_PLAY_VISITS, _SELF_PLAY_BASE_SEED
+
+    # 여러 self-play 프로세스가 동시에 뜰 때 PyTorch 내부 CPU 스레드 과점유를 막는다.
+    if torch_threads > 0:
+        torch.set_num_threads(torch_threads)
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
+
+    # 각 워커가 같은 최신 모델 스냅샷으로 MCTS를 수행하도록 초기화한다.
+    # 각 worker가 지정된 장치에 self-play 전용 모델을 올린다.
+    device = torch.device(device_type)
+    if device.type == "cuda":
+        configure_torch_runtime()
+    model = _build_self_play_model(state_dict, board_size, device)
+    _SELF_PLAY_MCTS = MCTS(model=model, board_size=board_size, eval_batch_size=mcts_batch_size)
+    _SELF_PLAY_VISITS = visits
+    _SELF_PLAY_BASE_SEED = base_seed
+
+
+def _self_play_worker_game(game_index: int):
+    if _SELF_PLAY_MCTS is None:
+        raise RuntimeError("Self-play worker was not initialized.")
+
+    # 병렬 실행 순서가 바뀌어도 seed가 있으면 게임별 난수가 고정되도록 한다.
+    if _SELF_PLAY_BASE_SEED is not None:
+        set_seed(_SELF_PLAY_BASE_SEED + game_index)
+    return play_self_play_game(_SELF_PLAY_MCTS, simulations=_SELF_PLAY_VISITS)
+
+
+def _run_self_play_games(
+    *,
+    model: ModelWrapper,
+    board_size: int,
+    games_per_epoch: int,
+    visits: int,
+    mcts_batch_size: int,
+    self_play_workers: int,
+    self_play_torch_threads: int,
+    self_play_device: torch.device,
+    seed: Optional[int],
+    epoch: int,
+):
+    # 워커 1개는 기존과 같은 단일 프로세스 경로를 유지한다.
+    if self_play_workers <= 1:
+        if self_play_device == model.device:
+            self_play_model = model
+        else:
+            state_dict = _copy_state_dict_to_cpu(model)
+            self_play_model = _build_self_play_model(state_dict, board_size, self_play_device)
+        mcts = MCTS(model=self_play_model, board_size=board_size, eval_batch_size=mcts_batch_size)
+        new_samples = []
+        for _ in range(games_per_epoch):
+            new_samples.extend(play_self_play_game(mcts, simulations=visits))
+        return new_samples
+
+    # self-play 게임을 프로세스 단위로 분산해 CPU 선택 로직과 GPU 추론 배치를 동시에 밀어 넣는다.
+    state_dict = _copy_state_dict_to_cpu(model)
+    base_seed = None if seed is None else seed + epoch * 100_000
+    results = [None] * games_per_epoch
+    context = mp.get_context("spawn")
+    with ProcessPoolExecutor(
+        max_workers=self_play_workers,
+        mp_context=context,
+        initializer=_self_play_worker_init,
+        initargs=(
+            state_dict,
+            board_size,
+            visits,
+            mcts_batch_size,
+            self_play_device.type,
+            base_seed,
+            self_play_torch_threads,
+        ),
+    ) as executor:
+        futures = {
+            executor.submit(_self_play_worker_game, game_index): game_index
+            for game_index in range(games_per_epoch)
+        }
+        for future in as_completed(futures):
+            game_index = futures[future]
+            results[game_index] = future.result()
+
+    new_samples = []
+    for game_samples in results:
+        if game_samples:
+            new_samples.extend(game_samples)
+    return new_samples
 
 
 def _symmetries(
@@ -182,6 +340,16 @@ def main(
     replay_buffer_size: int = typer.Option(20000, help="Maximum self-play samples kept for replay."),
     train_passes: int = typer.Option(2, help="Training passes over the replay buffer per epoch."),
     data_workers: int = typer.Option(0, help="DataLoader worker processes for training batches."),
+    self_play_workers: int = typer.Option(
+        1, help="Parallel self-play worker processes. 0 uses all logical CPU cores."
+    ),
+    self_play_device: str = typer.Option(
+        "auto",
+        help="Device for self-play inference: auto, cpu, or cuda. Auto uses CPU when self-play is parallel.",
+    ),
+    self_play_torch_threads: int = typer.Option(
+        1, help="Torch CPU threads per self-play worker. Set 0 to keep PyTorch default."
+    ),
     max_grad_norm: float = typer.Option(5.0, help="Gradient clipping norm. Set <=0 to disable."),
     loss_ema_alpha: float = typer.Option(0.3, help="EMA smoothing factor for best-model promotion."),
     augment: bool = typer.Option(True, help="Use 8-way board symmetry augmentation."),
@@ -193,8 +361,6 @@ def main(
     configure_torch_runtime()
     registry = ModelRegistry(root=checkpoint_root)
     model = ModelWrapper(board_size=board_size)
-    if mcts_batch_size <= 0:
-        mcts_batch_size = 64 if model.device.type == "cuda" else 16
     optimizer = torch.optim.Adam(model.net.parameters(), lr=lr, weight_decay=1e-4)
     scaler = make_grad_scaler()
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -206,6 +372,13 @@ def main(
     save_every = max(1, save_every)
     train_passes = max(1, train_passes)
     data_workers = max(0, data_workers)
+    self_play_worker_count = _resolve_self_play_workers(self_play_workers, games_per_epoch)
+    self_play_device_resolved = _resolve_self_play_device(
+        self_play_device, self_play_worker_count, model.device
+    )
+    if mcts_batch_size <= 0:
+        mcts_batch_size = 64 if self_play_device_resolved.type == "cuda" else 16
+    self_play_torch_threads = max(0, self_play_torch_threads)
     loss_ema_alpha = min(1.0, max(0.0, loss_ema_alpha))
 
     latest_dir = checkpoint_root / "latest"
@@ -237,11 +410,20 @@ def main(
 
     for epoch in range(start_epoch, epochs + 1):
         start = time.time()
-        mcts = MCTS(model=model, board_size=board_size, eval_batch_size=mcts_batch_size)
-        new_samples = []
-
-        for g in range(games_per_epoch):
-            new_samples.extend(play_self_play_game(mcts, simulations=visits))
+        selfplay_start = time.time()
+        new_samples = _run_self_play_games(
+            model=model,
+            board_size=board_size,
+            games_per_epoch=games_per_epoch,
+            visits=visits,
+            mcts_batch_size=mcts_batch_size,
+            self_play_workers=self_play_worker_count,
+            self_play_torch_threads=self_play_torch_threads,
+            self_play_device=self_play_device_resolved,
+            seed=seed,
+            epoch=epoch,
+        )
+        selfplay_duration = time.time() - selfplay_start
 
         replay_buffer.extend(new_samples)
         planes, target_p, target_v = tensorize(list(replay_buffer), board_size=board_size, augment=augment)
@@ -265,6 +447,7 @@ def main(
 
         policy_losses = []
         value_losses = []
+        train_start = time.time()
         for _ in range(max(1, train_passes)):
             for batch in loader:
                 p_loss, v_loss = model.train_step(
@@ -272,6 +455,7 @@ def main(
                 )
                 policy_losses.append(p_loss)
                 value_losses.append(v_loss)
+        train_duration = time.time() - train_start
 
         epoch_p_loss = sum(policy_losses) / len(policy_losses)
         epoch_v_loss = sum(value_losses) / len(value_losses)
@@ -287,7 +471,10 @@ def main(
             f"Epoch {epoch}/{epochs} loss={epoch_loss:.4f} ema={loss_ema:.4f} "
             f"(p={epoch_p_loss:.4f}, v={epoch_v_loss:.4f}) "
             f"samples={len(new_samples)} replay={len(replay_buffer)} "
-            f"mcts_batch={mcts_batch_size} lr={current_lr:.2e} time={duration:.1f}s"
+            f"mcts_batch={mcts_batch_size} selfplay_workers={self_play_worker_count} "
+            f"selfplay_device={self_play_device_resolved.type} "
+            f"lr={current_lr:.2e} selfplay={selfplay_duration:.1f}s "
+            f"train={train_duration:.1f}s time={duration:.1f}s"
         )
 
         metric_loss = loss_ema

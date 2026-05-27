@@ -6,7 +6,15 @@ Reinforcement-learning playground for Gomoku (15x15, Long Pro rule). The project
 
 ```bash
 uv venv
-uv pip install -r requirements.txt
+uv sync
+```
+
+This project uses `pyproject.toml` and points `torch` at the official CUDA 12.8 PyTorch wheel index on Windows/Linux. This is intended for modern NVIDIA GPUs such as RTX 50-series cards.
+
+Verify that PyTorch can see the GPU:
+
+```bash
+uv run python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
 
 ## Training
@@ -19,13 +27,14 @@ uv run python train.py --epochs 50 --games-per-epoch 20 --visits 200
 
 Checkpoints live in `checkpoints/latest` and promoted best models are copied to `checkpoints/best`. A lightweight `model_index.json` keeps metadata for the web UI.
 
-For a CUDA machine, keep MCTS on CPU but batch the neural-network leaf evaluations on GPU:
+For a CUDA machine, keep training on GPU and run parallel self-play inference on CPU. This avoids creating many CUDA contexts from spawned self-play processes:
 
 ```bash
-uv run python train.py --epochs 150 --games-per-epoch 20 --visits 160 --mcts-batch-size 64 --batch-size 256 --data-workers 2
+uv run python train.py --epochs 150 --games-per-epoch 20 --visits 160 --mcts-batch-size 0 --batch-size 1024 --data-workers 2 --self-play-workers 0 --self-play-device auto --self-play-torch-threads 1
 ```
 
-Use `--mcts-batch-size 0` to choose a default automatically: 64 on CUDA, 16 on CPU.
+Use `--mcts-batch-size 0` to choose a default automatically: 64 when self-play uses CUDA, 16 when it uses CPU.
+Use `--self-play-workers 0` to run self-play in parallel with all logical CPU cores. If you explicitly set `--self-play-device cuda`, keep `--self-play-workers` low to avoid CUDA compiler and context memory pressure.
 
 Quick tactical verification for a trained checkpoint:
 
@@ -40,7 +49,7 @@ Assumptions about Long Pro: black must win with exactly five; making an overline
 Serve the API + static files:
 
 ```bash
-uvicorn server:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn server:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Open `http://localhost:8000` and play in the browser. Use the model selector to switch among saved checkpoints; default is the latest model.
