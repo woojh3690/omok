@@ -1,20 +1,20 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Omok RL Playground</title>
+    <title>오목 RL 플레이그라운드</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
     <div class="layout">
       <header>
         <h1>Omok RL</h1>
-        <p class="subtitle">Long Pro · 15x15 · Play against self-play checkpoints</p>
+        <p class="subtitle">중국/렌주식 금수 · 15x15 · 자가대국 체크포인트 상대</p>
         <div class="controls">
-          <button id="new-game">New Game</button>
+          <button id="new-game">새 게임</button>
           <label class="select-wrap">
-            <span>Model</span>
+            <span>모델</span>
             <select id="model-select"></select>
           </label>
         </div>
@@ -24,21 +24,23 @@
         <div id="board" class="board"></div>
         <aside class="info">
           <div class="status">
-            <h3>Status</h3>
-            <p id="status-text">Loading...</p>
+            <h3>상태</h3>
+            <p id="status-text">불러오는 중...</p>
           </div>
           <div class="legend">
-            <h3>Legend</h3>
-            <p><span class="stone black"></span> Black (You)</p>
-            <p><span class="stone white"></span> White (AI)</p>
+            <h3>범례</h3>
+            <p><span class="stone black"></span> 흑 (나)</p>
+            <p><span class="stone white"></span> 백 (AI)</p>
+            <p><span class="forbidden-sample">×</span> 금수점</p>
+          </div>
+          <div class="rule-state">
+            <h3>현재 룰</h3>
+            <p id="swap-state">불러오는 중...</p>
+            <div id="forbidden-list" class="forbidden-list"></div>
           </div>
           <div class="note">
-            <h3>Notes</h3>
-            <ul>
-              <li>Rule: Long Pro (black overlines are fouls)</li>
-              <li>Board: 15x15 fixed</li>
-              <li>Use the model selector to swap checkpoints</li>
-            </ul>
+            <h3>적용 규칙</h3>
+            <div id="rule-list" class="rule-list"></div>
           </div>
         </aside>
       </main>

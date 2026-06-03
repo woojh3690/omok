@@ -2,12 +2,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from omok.game import GomokuBoard
+from omok.game import (
+    BLACK,
+    EMPTY,
+    FORBIDDEN_DOUBLE_FOUR,
+    FORBIDDEN_DOUBLE_THREE,
+    FORBIDDEN_FOUR_THREE,
+    FORBIDDEN_OVERLINE,
+    GomokuBoard,
+)
 from omok.mcts import MCTS
 from omok.model import ModelWrapper
 from omok.storage import ModelRegistry
@@ -105,14 +112,95 @@ class ModelManager:
 session = GameSession()
 models = ModelManager()
 
+FORBIDDEN_RULE_LABELS = {
+    FORBIDDEN_OVERLINE: "6목 금지",
+    FORBIDDEN_DOUBLE_FOUR: "4x4 금지",
+    FORBIDDEN_DOUBLE_THREE: "3x3 금지",
+    FORBIDDEN_FOUR_THREE: "4x3 금지",
+}
+
+RULE_ITEMS = [
+    {
+        "id": FORBIDDEN_OVERLINE,
+        "label": "6목 금지",
+        "description": "흑은 6개 이상 연속된 돌을 만들 수 없습니다.",
+    },
+    {
+        "id": FORBIDDEN_DOUBLE_FOUR,
+        "label": "4x4 금지",
+        "description": "흑은 한 수로 두 개 이상의 사를 동시에 만들 수 없습니다.",
+    },
+    {
+        "id": FORBIDDEN_DOUBLE_THREE,
+        "label": "3x3 금지",
+        "description": "흑은 한 수로 두 개 이상의 활삼을 동시에 만들 수 없습니다.",
+    },
+    {
+        "id": FORBIDDEN_FOUR_THREE,
+        "label": "4x3 금지",
+        "description": "이 프리셋에서는 흑의 사와 활삼 동시 생성도 막습니다.",
+    },
+]
+
+
+def forbidden_moves_payload(board: GomokuBoard) -> list[dict]:
+    # 현재 차례가 흑일 때 실제 보드 판정 함수를 돌려 화면에 표시할 금수점을 만든다.
+    if board.winner is not None or board.current_player != BLACK:
+        return []
+
+    moves = []
+    for y in range(board.size):
+        for x in range(board.size):
+            if board.board[y, x] != EMPTY:
+                continue
+            reason = board.forbidden_reason(BLACK, x, y)
+            if reason is None:
+                continue
+            moves.append(
+                {
+                    "x": x,
+                    "y": y,
+                    "reason": reason,
+                    "label": FORBIDDEN_RULE_LABELS.get(reason, "금수"),
+                }
+            )
+    return moves
+
+
+def invalid_move_detail(board: GomokuBoard, x: int, y: int) -> str:
+    # 사용자가 금수점을 누른 경우에는 일반 오류 대신 금수 이름을 알려준다.
+    reason = board.forbidden_reason(board.current_player, x, y)
+    if reason is None:
+        return "Invalid move"
+    label = FORBIDDEN_RULE_LABELS.get(reason, "금수")
+    return f"Invalid move: {label}"
+
+
+def rule_payload(board: GomokuBoard) -> dict:
+    # 룰 패널은 실제 서버 설정과 현재 스왑 상태를 같이 보여준다.
+    return {
+        "name": "Chinese/Renju preset",
+        "items": RULE_ITEMS,
+        "swap": {
+            "enabled": board.enable_swap_rule,
+            "available": board.can_swap(),
+            "used": board.swap_used,
+            "description": "첫 흑 착수 직후 백이 색을 바꿀 수 있는 오프닝 절차입니다.",
+        },
+    }
+
 
 def board_payload(board: GomokuBoard):
+    # 클라이언트가 현재 룰 상태를 표시할 수 있도록 스왑 가능 여부도 함께 내려준다.
     return {
         "board": board.board.tolist(),
         "current_player": board.current_player,
         "winner": board.winner,
         "foul": board.foul,
         "last_move": board.last_move,
+        "swap_available": board.can_swap(),
+        "rules": rule_payload(board),
+        "forbidden_moves": forbidden_moves_payload(board),
     }
 
 
@@ -138,6 +226,16 @@ async def new_game():
     return board_payload(session.board)
 
 
+@app.post("/api/game/swap")
+async def swap_opening():
+    # 스왑은 첫 흑 착수 직후 한 번만 허용되는 오프닝 절차다.
+    try:
+        session.board.swap_opening()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return board_payload(session.board)
+
+
 @app.post("/api/game/move")
 async def play_move(payload: dict):
     if session.board.winner is not None:
@@ -149,7 +247,7 @@ async def play_move(payload: dict):
         raise HTTPException(status_code=400, detail="x and y are required")
 
     if not session.board.is_valid_move(x, y):
-        raise HTTPException(status_code=400, detail="Invalid move")
+        raise HTTPException(status_code=400, detail=invalid_move_detail(session.board, x, y))
 
     session.board.play_move(x, y)
     if session.board.winner is None:
@@ -164,9 +262,12 @@ async def play_move(payload: dict):
 def choose_ai_action(board: GomokuBoard, model: ModelWrapper) -> Optional[int]:
     if board.winner is not None:
         return None
+    legal_actions = board.legal_actions_flat()
+    if not legal_actions:
+        return None
     mcts = MCTS(model=model, board_size=board.size, c_puct=2.2)
     pi = mcts.run(board.clone(), num_simulations=200, add_noise=False)
-    return int(np.argmax(pi))
+    return int(max(legal_actions, key=lambda action: pi[action]))
 
 
 @app.get("/api/state")

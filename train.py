@@ -1,4 +1,5 @@
 import multiprocessing as mp
+import gc
 import os
 import random
 import time
@@ -92,14 +93,25 @@ def _build_self_play_model(
     return model
 
 
-def _resolve_self_play_workers(requested_workers: int, games_per_epoch: int) -> int:
+def _cap_mcts_batch_size(mcts_batch_size: int, self_play_device: torch.device) -> int:
+    # CPU self-play는 worker마다 배치 버퍼를 만들기 때문에 큰 배치를 보수적으로 제한한다.
+    if self_play_device.type == "cpu" and mcts_batch_size > 64:
+        print(f"Reducing CPU self-play mcts_batch_size from {mcts_batch_size} to 64.")
+        return 64
+    return mcts_batch_size
+
+
+def _resolve_self_play_workers(
+    requested_workers: int, games_per_epoch: int, max_workers: int
+) -> int:
     # 0 이하 값은 현재 PC의 논리 코어를 최대한 쓰는 자동 설정으로 처리한다.
     if games_per_epoch <= 1:
         return 1
     if requested_workers <= 0:
         cpu_count = os.cpu_count() or 1
         requested_workers = max(1, cpu_count)
-    return min(max(1, requested_workers), games_per_epoch)
+    max_workers = max(1, max_workers)
+    return min(max(1, requested_workers), games_per_epoch, max_workers)
 
 
 def _self_play_worker_init(
@@ -337,11 +349,17 @@ def main(
     mcts_batch_size: int = typer.Option(
         0, help="Leaf evaluation batch size for MCTS. 0 chooses 64 on CUDA and 16 on CPU."
     ),
-    replay_buffer_size: int = typer.Option(20000, help="Maximum self-play samples kept for replay."),
+    replay_buffer_size: int = typer.Option(12000, help="Maximum self-play samples kept for replay."),
     train_passes: int = typer.Option(2, help="Training passes over the replay buffer per epoch."),
+    max_train_batch_size: int = typer.Option(
+        512, help="Conservative upper bound for training batch size."
+    ),
     data_workers: int = typer.Option(0, help="DataLoader worker processes for training batches."),
     self_play_workers: int = typer.Option(
         1, help="Parallel self-play worker processes. 0 uses all logical CPU cores."
+    ),
+    max_self_play_workers: int = typer.Option(
+        8, help="Conservative upper bound for self-play worker processes."
     ),
     self_play_device: str = typer.Option(
         "auto",
@@ -371,13 +389,21 @@ def main(
     replay_buffer = deque(maxlen=max(1, replay_buffer_size))
     save_every = max(1, save_every)
     train_passes = max(1, train_passes)
+    max_train_batch_size = max(1, max_train_batch_size)
+    if batch_size > max_train_batch_size:
+        # 큰 학습 배치는 텐서화된 replay와 함께 GPU/CPU 피크 메모리를 키우므로 기본적으로 제한한다.
+        print(f"Reducing training batch_size from {batch_size} to {max_train_batch_size}.")
+        batch_size = max_train_batch_size
     data_workers = max(0, data_workers)
-    self_play_worker_count = _resolve_self_play_workers(self_play_workers, games_per_epoch)
+    self_play_worker_count = _resolve_self_play_workers(
+        self_play_workers, games_per_epoch, max_self_play_workers
+    )
     self_play_device_resolved = _resolve_self_play_device(
         self_play_device, self_play_worker_count, model.device
     )
     if mcts_batch_size <= 0:
         mcts_batch_size = 64 if self_play_device_resolved.type == "cuda" else 16
+    mcts_batch_size = _cap_mcts_batch_size(mcts_batch_size, self_play_device_resolved)
     self_play_torch_threads = max(0, self_play_torch_threads)
     loss_ema_alpha = min(1.0, max(0.0, loss_ema_alpha))
 
@@ -435,7 +461,7 @@ def main(
         loader_kwargs = {}
         if data_workers > 0:
             loader_kwargs["num_workers"] = data_workers
-            loader_kwargs["persistent_workers"] = True
+            loader_kwargs["persistent_workers"] = False
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
@@ -499,6 +525,12 @@ def main(
                 best_loss=best_loss,
                 loss_ema=loss_ema,
             )
+
+        # 다음 epoch의 self-play 동안 직전 학습 텐서와 DataLoader가 메모리에 남지 않도록 정리한다.
+        del loader, dataset, planes, target_p, target_v, policy_losses, value_losses, new_samples
+        gc.collect()
+        if model.device.type == "cuda":
+            torch.cuda.empty_cache()
 
     print("Training finished.")
 

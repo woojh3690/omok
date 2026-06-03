@@ -98,7 +98,7 @@ class MCTS:
 
     def _winning_actions(self, board: GomokuBoard, player: int) -> list[int]:
         actions: list[int] = []
-        for action in board.legal_actions_flat():
+        for action in board.legal_actions_flat_for_player(player):
             x, y = board.from_flat_index(action)
             if board.winner_after_virtual_move(player, x, y) == player:
                 actions.append(action)
