@@ -14,6 +14,7 @@ from omok.game import (
     FORBIDDEN_FOUR_THREE,
     FORBIDDEN_OVERLINE,
     GomokuBoard,
+    WHITE,
 )
 from omok.mcts import MCTS
 from omok.model import ModelWrapper
@@ -240,6 +241,8 @@ async def swap_opening():
 async def play_move(payload: dict):
     if session.board.winner is not None:
         return board_payload(session.board)
+    if session.board.current_player != BLACK:
+        raise HTTPException(status_code=409, detail="AI turn")
 
     x = payload.get("x")
     y = payload.get("y")
@@ -250,11 +253,21 @@ async def play_move(payload: dict):
         raise HTTPException(status_code=400, detail=invalid_move_detail(session.board, x, y))
 
     session.board.play_move(x, y)
-    if session.board.winner is None:
-        ai_action = choose_ai_action(session.board, models.model)
-        if ai_action is not None:
-            ax, ay = session.board.from_flat_index(ai_action)
-            session.board.play_move(ax, ay)
+    return board_payload(session.board)
+
+
+@app.post("/api/game/ai-move")
+async def play_ai_move():
+    # 사람 돌을 먼저 화면에 반영한 뒤 별도 요청에서 AI 응수를 계산한다.
+    if session.board.winner is not None:
+        return board_payload(session.board)
+    if session.board.current_player != WHITE:
+        raise HTTPException(status_code=409, detail="Human turn")
+
+    ai_action = choose_ai_action(session.board, models.model)
+    if ai_action is not None:
+        ax, ay = session.board.from_flat_index(ai_action)
+        session.board.play_move(ax, ay)
 
     return board_payload(session.board)
 

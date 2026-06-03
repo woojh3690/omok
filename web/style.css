@@ -115,6 +115,10 @@ main {
   background: #23405f;
 }
 
+.board.thinking .cell {
+  cursor: progress;
+}
+
 .cell.forbidden {
   background: var(--forbidden-bg);
   border-color: rgba(255, 107, 107, 0.65);

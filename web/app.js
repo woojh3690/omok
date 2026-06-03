@@ -7,6 +7,8 @@ const forbiddenListEl = document.getElementById("forbidden-list");
 const swapStateEl = document.getElementById("swap-state");
 
 let state = null;
+let aiRequestInFlight = false;
+let aiRequestId = 0;
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -46,6 +48,7 @@ function renderBoard() {
   if (!state) return;
   const forbidden = forbiddenMap();
   boardEl.innerHTML = "";
+  boardEl.classList.toggle("thinking", aiRequestInFlight);
   boardEl.style.gridTemplateColumns = `repeat(${state.board[0].length}, 1fr)`;
   state.board.flat().forEach((cell, idx) => {
     const div = document.createElement("div");
@@ -164,6 +167,7 @@ function updateStatus(msg) {
   if (state.winner === 1) statusEl.textContent = "흑 승리";
   else if (state.winner === 2) statusEl.textContent = "백 승리";
   else if (state.winner === 0) statusEl.textContent = "무승부";
+  else if (aiRequestInFlight) statusEl.textContent = "AI 생각 중...";
   else if (state.current_player === 1) statusEl.textContent = "흑 차례";
   else statusEl.textContent = "백 차례";
 }
@@ -188,7 +192,7 @@ async function fetchModels() {
 }
 
 async function onCellClick(x, y) {
-  if (!state || state.winner !== null || state.current_player !== 1) return;
+  if (!state || aiRequestInFlight || state.winner !== null || state.current_player !== 1) return;
   const forbiddenInfo = forbiddenMap().get(forbiddenKey(x, y));
   if (forbiddenInfo) {
     updateStatus(`${formatPoint(x, y)} ${forbiddenInfo.label}: 둘 수 없는 자리입니다.`);
@@ -200,12 +204,36 @@ async function onCellClick(x, y) {
       body: JSON.stringify({ x, y }),
     });
     renderBoard();
+    if (state.winner === null && state.current_player === 2) {
+      await requestAiMove();
+    }
   } catch (err) {
     updateStatus(err.message);
   }
 }
 
+async function requestAiMove() {
+  const requestId = ++aiRequestId;
+  aiRequestInFlight = true;
+  renderBoard();
+  try {
+    const nextState = await api("/api/game/ai-move", { method: "POST" });
+    if (requestId === aiRequestId) {
+      state = nextState;
+    }
+  } catch (err) {
+    updateStatus(err.message);
+  } finally {
+    if (requestId === aiRequestId) {
+      aiRequestInFlight = false;
+      renderBoard();
+    }
+  }
+}
+
 async function newGame() {
+  aiRequestId += 1;
+  aiRequestInFlight = false;
   state = await api("/api/game/new", { method: "POST" });
   renderBoard();
 }
